@@ -479,9 +479,62 @@ for(let i=0; i<=crowdSize; i++) {
   });
 }
 
+// ===== Nouvelles structures de données pour le mode SCÈNE réaliste =====
+
+// Lyres / projecteurs motorisés (têtes mobiles) — chacune a une position fixe sur la structure
+// et une orientation qui s'anime indépendamment.
+let moverHeads = []; // rempli dans setupStageRig()
+let stageRigReady = false;
+
+// Mur LED façon vraie grille de pixels (colonnes x lignes), chaque cellule a sa propre énergie lissée
+const LED_COLS = 18;
+const LED_ROWS = 10;
+let ledCells = new Float32Array(LED_COLS * LED_ROWS);
+
+// Particules de fumée basses, indépendantes des particules de beat existantes
+let smokeParticles = [];
+function spawnSmoke(W, H) {
+  if (smokeParticles.length > 70) return;
+  smokeParticles.push({
+    x: W * (0.15 + Math.random() * 0.7),
+    y: H * 0.92 + Math.random() * 10,
+    vx: (Math.random() - 0.5) * 0.25,
+    vy: -0.18 - Math.random() * 0.22,
+    r: 30 + Math.random() * 50,
+    life: 1
+  });
+}
+
+function setupStageRig(W, H) {
+  moverHeads = [];
+  // Rampe avant (face), au-dessus de l'écran LED
+  for (let i = 0; i < 6; i++) {
+    moverHeads.push({
+      group: 'front',
+      baseAngle: Math.PI / 2 + 0.15, // pointent globalement vers le bas/public
+      swing: 0.9,
+      speed: 0.5 + Math.random() * 0.3,
+      phase: Math.random() * Math.PI * 2
+    });
+  }
+  // Pendrillons latéraux (gauche/droite), plus hauts, balayage large façon "sweep" de festival
+  for (let i = 0; i < 6; i++) {
+    const isRight = i >= 3;
+    moverHeads.push({
+      group: isRight ? 'right' : 'left',
+      baseAngle: isRight ? Math.PI * 0.85 : Math.PI * 0.15,
+      swing: 1.1,
+      speed: 0.35 + Math.random() * 0.25,
+      phase: Math.random() * Math.PI * 2
+    });
+  }
+  stageRigReady = true;
+}
+
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
+  stageRigReady = false; // re-calculé au prochain frame en mode stage si besoin (positions relatives à W/H, pas besoin de recalcul réel, mais on garde le flag pour cohérence)
 }
 resize();
 window.addEventListener('resize', resize);
@@ -574,7 +627,7 @@ async function initAudio(stream) {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 2048;
-  analyser.smoothingTimeConstant = 0.45; 
+  analyser.smoothingTimeConstant = 0.25; 
   bufferLength = analyser.frequencyBinCount;
   dataArray = new Uint8Array(bufferLength);
 
@@ -625,6 +678,7 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
   audioCtx = new AudioContext();
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.25;
   bufferLength = analyser.frequencyBinCount;
   dataArray = new Uint8Array(bufferLength);
 
@@ -642,6 +696,7 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
   sourceToggle.style.display = 'flex';
   document.querySelectorAll('.src-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('btn-file').classList.add('active');
+  if (animId) cancelAnimationFrame(animId);
   animate();
 });
 
@@ -949,95 +1004,318 @@ function drawSimpleCrowd(W, H, bass) {
   }
 }
 
-function drawStage(W, H, bass, mid, treble) {
-  const bNorm = bass/255, mNorm = mid/255, tNorm = treble/255;
-  const dynamicChromaHue = (hue * 5) % 360;
+/* =========================================================================
+   MODE SCÈNE — REFONTE COMPLÈTE
+   Objectif : une vraie impression de structure de festival (truss en treillis,
+   lyres motorisées identifiables, mur LED pixelisé qui réagit par zone,
+   perspective de sol, fumée basse, foule en silhouette au premier plan).
+   ========================================================================= */
 
-  const panels = 5, pW = W*0.14, pH = H*0.35, gap = W*0.02;
-  const startX = (W - (panels*pW + (panels-1)*gap)) / 2;
+// --- petits utilitaires de dessin réutilisés dans le rig ---
 
-  for (let i = 0; i < panels; i++) {
-    const x = startX + i*(pW+gap), y = H*0.15;
-    const energy = dataArray[Math.floor(i*45)] / 255;
-    ctx.fillStyle = `hsla(${(hue + i*45)%360}, 100%, 45%, ${0.03 + energy*0.65})`;
-    ctx.fillRect(x, y, pW, pH);
-    ctx.strokeStyle = `rgba(255,255,255,${0.08 + energy*0.3})`;
-    ctx.strokeRect(x, y, pW, pH);
-    if (bNorm > 0.85 && isBeatFrame) {
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
-      ctx.fillRect(x, y, pW, pH);
-    }
+function drawTrussSegment(x1, y1, x2, y2, thickness, alpha) {
+  // Un segment de "truss" alu : deux rails parallèles + croisillons, comme une vraie poutre de scène
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  const nx = -dy / len, ny = dx / len; // normale unitaire
+  const hw = thickness / 2;
+
+  ctx.strokeStyle = `rgba(180,190,200,${alpha})`;
+  ctx.lineWidth = 1.4;
+
+  // rails
+  ctx.beginPath();
+  ctx.moveTo(x1 + nx*hw, y1 + ny*hw); ctx.lineTo(x2 + nx*hw, y2 + ny*hw);
+  ctx.moveTo(x1 - nx*hw, y1 - ny*hw); ctx.lineTo(x2 - nx*hw, y2 - ny*hw);
+  ctx.stroke();
+
+  // croisillons façon zigzag
+  const segments = Math.max(2, Math.round(len / (thickness * 1.1)));
+  ctx.beginPath();
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const px = x1 + dx * t, py = y1 + dy * t;
+    const side = (i % 2 === 0) ? 1 : -1;
+    const ex = px + nx * hw * side, ey = py + ny * hw * side;
+    if (i === 0) ctx.moveTo(ex, ey); else ctx.lineTo(ex, ey);
   }
+  ctx.stroke();
+}
 
-  const count = DEV_CONFIG.stageLaserCount; 
-  for (let i = 0; i < count; i++) {
-    const lHue = (laserColorMode === 'chroma') ? dynamicChromaHue : (hue + i * (360 / count)) % 360;
-    let cx, cy, baseAngle;
+function drawMoverHead(x, y, angle, lHue, bNorm, scale, alphaBoost) {
+  // Corps de la lyre : base ronde fixe + tête mobile orientable + faisceau volumétrique
+  const baseR = 8 * scale;
 
-    if (i < 4) { 
-      cx = W * 0.22 + (i / 3) * (W * 0.56); cy = H * 0.15; baseAngle = Math.PI / 2; 
-    } else if (i < 8) { 
-      const sideIdx = i - 4; const isRight = sideIdx >= 2;
-      cx = isRight ? W * 0.92 : W * 0.08; cy = H * 0.20 + (sideIdx % 2) * (H * 0.18);
-      baseAngle = isRight ? Math.PI : 0; 
-    } else { 
-      const floorIdx = i - 8; cx = W * 0.16 + (floorIdx / 3) * (W * 0.68); cy = H * 0.53;
-      baseAngle = -Math.PI / 2; 
-    }
+  // halo ambiant chaud autour de la source (donne l'impression de vraie source lumineuse)
+  const haloR = 26 * scale * (0.7 + bNorm * 0.8);
+  const halo = ctx.createRadialGradient(x, y, 0, x, y, haloR);
+  halo.addColorStop(0, `hsla(${lHue},100%,75%,${0.5 * alphaBoost})`);
+  halo.addColorStop(1, 'transparent');
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(x, y, haloR, 0, Math.PI*2); ctx.fill();
 
-    if (isBeatFrame) {
-      const scatter = (i < 4 || i >= 8) ? 0.55 : 0.35;
-      laserTargets[i] = (Math.random() - 0.5) * Math.PI * scatter;
-    }
-    
-    laserAngles[i] += (laserTargets[i] - laserAngles[i]) * DEV_CONFIG.interpolationSpeed;
-    const finalAngle = baseAngle + laserAngles[i];
+  // base fixe (yoke) — petit boîtier métallique
+  ctx.fillStyle = 'rgba(28,30,36,0.95)';
+  ctx.beginPath(); ctx.arc(x, y, baseR, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(90,95,105,0.8)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
-    const beamLength = Math.max(W, H) * 1.3;
-    let laserAlpha = 1;
-    if (tNorm > 0.68 && !isBeatFrame && Math.random() > 0.65) laserAlpha = 0.15;
+  // tête orientable (petit rectangle qui pivote réellement vers `angle`)
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.fillStyle = 'rgba(15,16,20,0.95)';
+  ctx.fillRect(-baseR*0.55, -baseR*0.95, baseR*1.1, baseR*1.9);
+  // lentille lumineuse au bout de la tête
+  ctx.fillStyle = `hsla(${lHue},100%,80%,${0.95 * alphaBoost})`;
+  ctx.shadowColor = `hsl(${lHue},100%,60%)`;
+  ctx.shadowBlur = 12 * scale;
+  ctx.beginPath(); ctx.arc(0, baseR*0.95, baseR*0.42, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
 
-    renderAdvancedBeam(cx, cy, cx + Math.cos(finalAngle)*beamLength, cy + Math.sin(finalAngle)*beamLength, finalAngle, lHue, bNorm, laserAlpha);
-  }
+function renderVolumetricBeam(cx, cy, angle, length, lHue, bNorm, alpha) {
+  // Faisceau large et doux (façon vraie diffusion dans le brouillard de scène),
+  // distinct des lasers fins de renderAdvancedBeam — ici on veut un cône large.
+  const spread = 0.085 + bNorm * 0.05;
+  const tx = cx + Math.cos(angle) * length;
+  const ty = cy + Math.sin(angle) * length;
+  const a1 = angle - spread, a2 = angle + spread;
+  const x1 = cx + Math.cos(a1) * length, y1 = cy + Math.sin(a1) * length;
+  const x2 = cx + Math.cos(a2) * length, y2 = cy + Math.sin(a2) * length;
 
-  ctx.strokeStyle = '#0f0f14'; ctx.lineWidth = 6; ctx.beginPath();
-  ctx.moveTo(W*0.08, H*0.54); ctx.lineTo(W*0.08, H*0.1); ctx.lineTo(W*0.92, H*0.1); ctx.lineTo(W*0.92, H*0.54);
-  ctx.lineTo(W*0.8, H*0.54); ctx.lineTo(W*0.2, H*0.54); ctx.closePath(); ctx.stroke();
+  const g = ctx.createLinearGradient(cx, cy, tx, ty);
+  g.addColorStop(0, `hsla(${lHue},100%,85%,${alpha * 0.55})`);
+  g.addColorStop(0.5, `hsla(${lHue},100%,60%,${alpha * 0.22})`);
+  g.addColorStop(1, 'transparent');
 
-  ctx.fillStyle = '#030305'; ctx.beginPath();
-  ctx.moveTo(W*0.15, H*0.54); ctx.lineTo(W*0.85, H*0.54); ctx.lineTo(W*0.88, H*0.57); ctx.lineTo(W*0.12, H*0.57);
-  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.closePath();
+  ctx.fill();
+}
 
-  const step = W / crowdSize;
-  for (let i = 0; i <= crowdSize; i++) {
-    const p = crowdOffsets[i]; const x = i * step;
-    const jump = Math.sin(time * 12 + p.speedPhase) * (1.5 + bNorm * 18) * p.heightFactor;
-    const headY = H * 0.89 + jump;
-    
-    ctx.fillStyle = '#010102';
-    ctx.beginPath();
-    ctx.moveTo(x - step * 0.6, H); ctx.lineTo(x - step * 0.3, headY + p.headRadius * 0.8);
-    ctx.arc(x, headY, p.headRadius, 0, Math.PI, true);
-    ctx.lineTo(x + step * 0.3, headY + p.headRadius * 0.8); ctx.lineTo(x + step * 0.6, H);
-    ctx.closePath(); ctx.fill();
+function drawLEDWall(x, y, w, h, dataArray, bufferLength, hue, bNorm) {
+  // Vrai mur LED pixelisé : grille de cellules, chacune lit une bande de fréquence
+  // et possède sa propre inertie lumineuse (ledCells), pour un rendu moins "plat" qu'un dégradé.
+  const cw = w / LED_COLS, ch = h / LED_ROWS;
 
-    ctx.strokeStyle = '#010102'; ctx.lineWidth = 5; ctx.lineCap = 'round';
-    const armWave = Math.sin(time * 8 + p.armPhase) * 14;
+  // cadre du mur (structure noire autour des pixels, comme un vrai panneau LED)
+  ctx.fillStyle = 'rgba(4,4,6,0.9)';
+  ctx.fillRect(x - 6, y - 6, w + 12, h + 12);
 
-    if (p.armStyle === 1) {
-      ctx.beginPath(); ctx.moveTo(x - 3, headY + 8); ctx.lineTo(x - 14 + armWave, headY - 14 + (bNorm * -7)); ctx.stroke();
-    } else if (p.armStyle === 2) {
-      ctx.beginPath(); ctx.moveTo(x - 4, headY + 8); ctx.lineTo(x - 15 + armWave, headY - 15 + (bNorm * -9));
-      ctx.moveTo(x + 4, headY + 8); ctx.lineTo(x + 15 - armWave, headY - 15 + (bNorm * -9)); ctx.stroke();
-    } else if (p.armStyle === 3) {
-      const phoneX = x + Math.sin(time * 2) * 3; const phoneY = headY - 13 + Math.sin(time * 4) * 2;
-      ctx.beginPath(); ctx.moveTo(x + 3, headY + 8); ctx.lineTo(phoneX, phoneY + 4); ctx.stroke();
-      if (bNorm > 0.42) {
-        ctx.fillStyle = `rgba(205, 235, 255, ${0.4 + Math.random() * 0.6})`;
-        ctx.beginPath(); ctx.arc(phoneX, phoneY, 1.8, 0, Math.PI * 2); ctx.fill();
+  for (let row = 0; row < LED_ROWS; row++) {
+    for (let col = 0; col < LED_COLS; col++) {
+      const idx = row * LED_COLS + col;
+      // bande de fréquence associée à la colonne, intensité modulée par la ligne (plus réactif au centre)
+      const freqIdx = Math.min(bufferLength - 1, 6 + col * 9 + row * 2);
+      const raw = (dataArray[freqIdx] || 0) / 255;
+      const rowFalloff = 1 - Math.abs(row - LED_ROWS/2) / (LED_ROWS/2) * 0.4;
+      const target = raw * rowFalloff;
+
+      // inertie : la cellule monte vite, descend lentement (comportement réaliste de LED pilotée)
+      ledCells[idx] = ledCells[idx] + (target - ledCells[idx]) * (target > ledCells[idx] ? 0.55 : 0.08);
+
+      const energy = ledCells[idx];
+      const px = x + col * cw, py = y + row * ch;
+      const cellHue = (hue + col * 8 + row * 4) % 360;
+
+      // pixel "allumé" avec léger espace inter-pixel pour l'effet grille
+      ctx.fillStyle = `hsla(${cellHue}, 95%, ${28 + energy*45}%, ${0.25 + energy*0.75})`;
+      ctx.fillRect(px + 1, py + 1, cw - 2, ch - 2);
+
+      if (energy > 0.55) {
+        ctx.shadowColor = `hsl(${cellHue},100%,60%)`;
+        ctx.shadowBlur = 6 * energy;
+        ctx.fillRect(px + 1, py + 1, cw - 2, ch - 2);
+        ctx.shadowBlur = 0;
       }
     }
   }
+}
+
+function drawStageRigStructure(W, H, topY, bottomY, leftX, rightX) {
+  // Portique principal en treillis : deux montants verticaux + traverse horizontale haute,
+  // avec une légère perspective (le bas est plus large que le haut) pour donner du volume.
+  const topLeftX = leftX + (rightX - leftX) * 0.06;
+  const topRightX = rightX - (rightX - leftX) * 0.06;
+
+  drawTrussSegment(topLeftX, topY, topRightX, topY, 14, 0.55);      // traverse haute
+  drawTrussSegment(leftX, bottomY, topLeftX, topY, 12, 0.5);         // montant gauche (incliné)
+  drawTrussSegment(rightX, bottomY, topRightX, topY, 12, 0.5);       // montant droit (incliné)
+
+  // petites traverses diagonales de contreventement, pur détail réaliste
+  drawTrussSegment(leftX, bottomY, topLeftX + (topRightX-topLeftX)*0.18, topY, 8, 0.28);
+  drawTrussSegment(rightX, bottomY, topRightX - (topRightX-topLeftX)*0.18, topY, 8, 0.28);
+}
+
+function drawStageFloorAndCrowd(W, H, bass, frontY) {
+  const bNorm = bass / 255;
+
+  // sol de scène en légère perspective (trapèze sombre réfléchissant)
+  const floorTopW = W * 0.62, floorBottomW = W * 0.94;
+  const floorTopY = frontY, floorBottomY = H;
+  const g = ctx.createLinearGradient(0, floorTopY, 0, floorBottomY);
+  g.addColorStop(0, 'rgba(20,20,28,0.9)');
+  g.addColorStop(1, 'rgba(4,4,7,0.98)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(W/2 - floorTopW/2, floorTopY);
+  ctx.lineTo(W/2 + floorTopW/2, floorTopY);
+  ctx.lineTo(W/2 + floorBottomW/2, floorBottomY);
+  ctx.lineTo(W/2 - floorBottomW/2, floorBottomY);
+  ctx.closePath();
+  ctx.fill();
+
+  // lignes de perspective subtiles sur le sol (façon dalles de scène)
+  ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+  ctx.lineWidth = 1;
+  for (let i = -4; i <= 4; i++) {
+    const topX = W/2 + (i/4) * (floorTopW/2);
+    const bottomX = W/2 + (i/4) * (floorBottomW/2);
+    ctx.beginPath();
+    ctx.moveTo(topX, floorTopY);
+    ctx.lineTo(bottomX, floorBottomY);
+    ctx.stroke();
+  }
+
+  // foule au premier plan, plus grande/proche que dans les autres modes (sensation de profondeur)
+  const step = W / crowdSize;
+  for (let i = 0; i <= crowdSize; i++) {
+    const p = crowdOffsets[i];
+    const x = i * step;
+    const jump = Math.sin(time * 12 + p.speedPhase) * (1.5 + bNorm * 20) * p.heightFactor;
+    const headY = H * 0.86 + jump;
+
+    ctx.fillStyle = 'rgba(2,2,4,0.92)';
+    ctx.beginPath();
+    ctx.moveTo(x - step * 0.62, H);
+    ctx.lineTo(x - step * 0.32, headY + p.headRadius * 0.85);
+    ctx.arc(x, headY, p.headRadius * 1.15, 0, Math.PI, true);
+    ctx.lineTo(x + step * 0.32, headY + p.headRadius * 0.85);
+    ctx.lineTo(x + step * 0.62, H);
+    ctx.closePath();
+    ctx.fill();
+
+    // bras levés occasionnels, cohérents avec le beat
+    if (p.armStyle === 2) {
+      const armWave = Math.sin(time * 8 + p.armPhase) * 14;
+      ctx.strokeStyle = 'rgba(2,2,4,0.92)';
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x - 4, headY + 8); ctx.lineTo(x - 16 + armWave, headY - 16 + (bNorm * -9));
+      ctx.moveTo(x + 4, headY + 8); ctx.lineTo(x + 16 - armWave, headY - 16 + (bNorm * -9));
+      ctx.stroke();
+    }
+  }
+}
+
+function drawStage(W, H, bass, mid, treble) {
+  const bNorm = bass/255, mNorm = mid/255, tNorm = treble/255;
+  const dynamicChromaHue = (hue * 5) % 360;
+  if (!stageRigReady) setupStageRig(W, H);
+
+  // --- Géométrie générale de la scène (perspective simple) ---
+  const leftX = W * 0.08, rightX = W * 0.92;
+  const topY = H * 0.08, frontY = H * 0.56; // frontY = ligne où la scène rencontre le sol/public
+
+  // brume de fond très légère pour donner de la profondeur atmosphérique derrière le truss
+  const fog = ctx.createLinearGradient(0, topY, 0, frontY);
+  fog.addColorStop(0, `hsla(${hue},60%,10%,0.35)`);
+  fog.addColorStop(1, 'rgba(2,2,4,0)');
+  ctx.fillStyle = fog;
+  ctx.fillRect(leftX, topY, rightX - leftX, frontY - topY);
+
+  // --- Mur LED en fond de scène, encadré par la structure ---
+  const ledW = (rightX - leftX) * 0.74, ledH = (frontY - topY) * 0.6;
+  const ledX = leftX + (rightX - leftX - ledW) / 2;
+  const ledY = topY + (frontY - topY) * 0.18;
+  drawLEDWall(ledX, ledY, ledW, ledH, dataArray, bufferLength, hue, bNorm);
+
+  // --- Structure en treillis autour ---
+  drawStageRigStructure(W, H, topY, frontY, leftX, rightX);
+
+  // --- Faisceaux volumétriques larges depuis la traverse haute (ambiance) ---
+  const topLeftX = leftX + (rightX - leftX) * 0.06;
+  const topRightX = rightX - (rightX - leftX) * 0.06;
+  for (let i = 0; i < 4; i++) {
+    const bx = topLeftX + (i/3) * (topRightX - topLeftX);
+    const sway = Math.sin(time * 0.6 + i * 1.7) * 0.3;
+    const lHue = (laserColorMode === 'chroma') ? dynamicChromaHue : (hue + i * 60) % 360;
+    renderVolumetricBeam(bx, topY, Math.PI/2 + sway, H * 0.55, lHue, bNorm, 0.5 + bNorm * 0.4);
+  }
+
+  // --- Lyres motorisées (têtes mobiles identifiables) sur la rampe avant et les côtés ---
+  moverHeads.forEach((mv, i) => {
+    if (isBeatFrame && Math.random() > 0.6) {
+      mv.targetSwing = (Math.random() - 0.5) * mv.swing;
+    }
+    mv.currentSwing = (mv.currentSwing || 0) + ((mv.targetSwing || 0) - (mv.currentSwing || 0)) * DEV_CONFIG.interpolationSpeed;
+    const liveAngle = mv.baseAngle + mv.currentSwing + Math.sin(time * mv.speed + mv.phase) * 0.12;
+
+    let hx, hy, scale;
+    if (mv.group === 'front') {
+      const idx = i; // 0..5
+      hx = topLeftX + ((idx) / 5) * (topRightX - topLeftX);
+      hy = topY + 6;
+      scale = 1.1;
+    } else if (mv.group === 'left') {
+      const idx = i - 6;
+      hx = leftX + 4;
+      hy = topY + (frontY - topY) * (0.25 + idx * 0.18);
+      scale = 0.95;
+    } else {
+      const idx = i - 9;
+      hx = rightX - 4;
+      hy = topY + (frontY - topY) * (0.25 + idx * 0.18);
+      scale = 0.95;
+    }
+
+    const lHue = (laserColorMode === 'chroma') ? dynamicChromaHue : (hue + i * (360/12)) % 360;
+
+    // faisceau fin et net (vrai rayon de lyre), distinct de la nappe volumétrique d'ambiance
+    const beamLen = Math.max(W, H) * 0.9;
+    let beamAlpha = 0.85;
+    if (tNorm > 0.7 && Math.random() > 0.6) beamAlpha = 0.15; // scintillement sur les aigus
+    renderAdvancedBeam(hx, hy, hx + Math.cos(liveAngle)*beamLen, hy + Math.sin(liveAngle)*beamLen, liveAngle, lHue, bNorm, beamAlpha);
+
+    drawMoverHead(hx, hy, liveAngle, lHue, bNorm, scale, 0.8 + bNorm * 0.5);
+  });
+
+  // --- Flash blanc de stroboscope au sol de scène sur les gros beats (cohérence avec le reste) ---
+  if (bNorm > 0.85 && isBeatFrame) {
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(leftX, topY, rightX - leftX, frontY - topY);
+  }
+
+  // --- Bord avant de scène (lèvre du praticable, ligne nette qui sépare scène et fosse) ---
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(leftX - 4, frontY);
+  ctx.lineTo(rightX + 4, frontY);
+  ctx.stroke();
+
+  // --- Fumée basse animée (ambiance club/festival) ---
+  if (Math.random() > 0.55) spawnSmoke(W, frontY);
+  smokeParticles = smokeParticles.filter(s => s.life > 0.02);
+  smokeParticles.forEach(s => {
+    s.x += s.vx; s.y += s.vy; s.life *= 0.985;
+    const sg = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r * (1.4 - s.life*0.4));
+    sg.addColorStop(0, `hsla(${hue},30%,70%,${0.06 * s.life})`);
+    sg.addColorStop(1, 'transparent');
+    ctx.fillStyle = sg;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
+  });
+
+  // --- Sol en perspective + foule au premier plan ---
+  drawStageFloorAndCrowd(W, H, bass, frontY);
 }
 
 function updateParticles() {
